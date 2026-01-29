@@ -1105,5 +1105,5 @@ export async function onboard(): Promise<void> {
     p.log.success(`Agent ID saved: ${config.agentId} (${baseUrl})`);
   }
   
-  p.outro('🎉 Setup complete! Run `lettabot server` to start.');
+  p.outro('🎉 Setup complete! Run `npx lettabot server` to start.');
 }
