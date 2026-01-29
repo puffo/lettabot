@@ -109,6 +109,12 @@ At least one channel is required. Telegram is the easiest to start with.
 | `/status` | Show current session info |
 | `/heartbeat` | Manually trigger a heartbeat check-in |
 
+## Connect to Letta Code 
+Any LettaBot agent can also be directly chatted with through Letta Code. Use the `/status` command to find your `agent_id`, and run: 
+```sh
+letta --agent <agent_id>
+```
+
 ## Skills
 LettaBot is compatible with [skills.sh](https://skills.sh) and [Clawdhub](https://clawdhub.com/). 
 
@@ -142,14 +148,6 @@ Available to import (20):
   ...
 ```
 
-### Feature-Gated Skills
-
-Some skills are automatically enabled based on your configuration:
-
-| Feature | Config | Skills Enabled |
-|---------|--------|----------------|
-| Scheduling | `CRON_ENABLED=true` | `scheduling` |
-| Gmail | `GMAIL_ACCOUNT=...` | `gog`, `google` |
 
 ## Security
 
