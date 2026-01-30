@@ -166,14 +166,14 @@ export class LettaBot {
     // Create or resume session
     let session: Session;
     // Base options for all sessions (model only included for new agents)
+    // Note: canUseTool workaround for SDK v0.0.3 bug - can be removed after letta-ai/letta-code-sdk#10 is released
     const baseOptions = {
       permissionMode: 'bypassPermissions' as const,
       allowedTools: this.config.allowedTools,
       cwd: this.config.workingDir,
       systemPrompt: SYSTEM_PROMPT,
+      canUseTool: () => ({ allow: true }),
     };
-    
-    console.log('[Bot] Session options:', JSON.stringify(baseOptions, null, 2));
     
     try {
       if (this.store.agentId) {
@@ -188,35 +188,6 @@ export class LettaBot {
         // Only pass model when creating a new agent
         session = createSession({ ...baseOptions, model: this.config.model, memory: loadMemoryBlocks(this.config.agentName) });
       }
-      console.log(`[Bot] Session object:`, Object.keys(session));
-      console.log(`[Bot] Session initialized:`, (session as any).initialized);
-      console.log(`[Bot] Session _agentId:`, (session as any)._agentId);
-      console.log(`[Bot] Session options.permissionMode:`, (session as any).options?.permissionMode);
-      
-      // Hook into transport errors and stdout
-      const transport = (session as any).transport;
-      if (transport?.process) {
-        console.log('[Bot] Transport process PID:', transport.process.pid);
-        transport.process.stdout?.on('data', (data: Buffer) => {
-          console.log('[Bot] CLI stdout:', data.toString().slice(0, 500));
-        });
-        transport.process.stderr?.on('data', (data: Buffer) => {
-          console.error('[Bot] CLI stderr:', data.toString());
-        });
-        transport.process.on('exit', (code: number) => {
-          console.log('[Bot] CLI process exited with code:', code);
-        });
-        transport.process.on('error', (err: Error) => {
-          console.error('[Bot] CLI process error:', err);
-        });
-      } else {
-        console.log('[Bot] No transport process found');
-      }
-      
-      // Initialize session explicitly (so we can log timing/failures)
-      console.log('[Bot] About to initialize session...');
-      console.log('[Bot] LETTA_API_KEY in env:', process.env.LETTA_API_KEY ? `${process.env.LETTA_API_KEY.slice(0, 30)}...` : 'NOT SET');
-      console.log('[Bot] LETTA_CLI_PATH:', process.env.LETTA_CLI_PATH || 'not set (will use default)');
       
       const initTimeoutMs = 30000; // Increased to 30s
       const withTimeout = async <T>(promise: Promise<T>, label: string): Promise<T> => {
@@ -233,22 +204,15 @@ export class LettaBot {
         }
       };
 
-      console.log('[Bot] Initializing session...');
       const initInfo = await withTimeout(session.initialize(), 'Session initialize');
-      console.log('[Bot] Session initialized:', initInfo);
+      console.log('[Bot] Session initialized, agent:', initInfo.agentId);
 
       // Send message to agent with metadata envelope
       const formattedMessage = formatMessageEnvelope(msg);
-      console.log('[Bot] Formatted message:', formattedMessage.slice(0, 200));
-      console.log('[Bot] Target server:', process.env.LETTA_BASE_URL || 'https://api.letta.com (default)');
-      console.log('[Bot] API key:', process.env.LETTA_API_KEY ? `${process.env.LETTA_API_KEY.slice(0, 20)}...` : '(not set)');
-      console.log('[Bot] Agent ID:', this.store.agentId || '(new agent)');
-      console.log('[Bot] Sending message to session...');
       try {
         await withTimeout(session.send(formattedMessage), 'Session send');
-        console.log('[Bot] Message sent successfully, starting stream...');
       } catch (sendError) {
-        console.error('[Bot] Error in session.send():', sendError);
+        console.error('[Bot] Error sending message:', sendError);
         throw sendError;
       }
       
@@ -256,6 +220,28 @@ export class LettaBot {
       let response = '';
       let lastUpdate = Date.now();
       let messageId: string | null = null;
+      let lastMsgType: string | null = null;
+      let sentAnyMessage = false;
+      
+      // Helper to finalize and send current accumulated response
+      const finalizeMessage = async () => {
+        if (response.trim()) {
+          try {
+            if (messageId) {
+              await adapter.editMessage(msg.chatId, messageId, response);
+            } else {
+              await adapter.sendMessage({ chatId: msg.chatId, text: response, threadId: msg.threadId });
+            }
+            sentAnyMessage = true;
+          } catch {
+            // Ignore send errors
+          }
+        }
+        // Reset for next message bubble
+        response = '';
+        messageId = null;
+        lastUpdate = Date.now();
+      };
       
       // Keep typing indicator alive
       const typingInterval = setInterval(() => {
@@ -264,6 +250,13 @@ export class LettaBot {
       
       try {
         for await (const streamMsg of session.stream()) {
+          // When message type changes, finalize the current message
+          // This ensures different message types appear as separate bubbles
+          if (lastMsgType && lastMsgType !== streamMsg.type && response.trim()) {
+            await finalizeMessage();
+          }
+          lastMsgType = streamMsg.type;
+          
           if (streamMsg.type === 'assistant') {
             response += streamMsg.content;
             
@@ -308,44 +301,37 @@ export class LettaBot {
         clearInterval(typingInterval);
       }
       
-      console.log(`[Bot] Stream complete. Response length: ${response.length}`);
-      console.log(`[Bot] Response preview: ${response.slice(0, 100)}...`);
-      
       // Send final response
-      if (response) {
-        console.log(`[Bot] Sending final response (messageId=${messageId})`);
+      if (response.trim()) {
         try {
           if (messageId) {
             await adapter.editMessage(msg.chatId, messageId, response);
-            console.log('[Bot] Edited existing message');
           } else {
             await adapter.sendMessage({ chatId: msg.chatId, text: response, threadId: msg.threadId });
-            console.log('[Bot] Sent new message');
           }
+          sentAnyMessage = true;
         } catch (sendError) {
-          console.error('[Bot] Error sending final message:', sendError);
-          // If we already sent a streamed message, don't duplicate — the user already saw it.
+          console.error('[Bot] Error sending response:', sendError);
           if (!messageId) {
             await adapter.sendMessage({ chatId: msg.chatId, text: response, threadId: msg.threadId });
+            sentAnyMessage = true;
           }
         }
-      } else {
-        console.log('[Bot] No response from agent, sending placeholder');
+      }
+      
+      // Only show "no response" if we never sent anything
+      if (!sentAnyMessage) {
         await adapter.sendMessage({ chatId: msg.chatId, text: '(No response from agent)', threadId: msg.threadId });
       }
       
     } catch (error) {
       console.error('[Bot] Error processing message:', error);
-      if (error instanceof Error) {
-        console.error('[Bot] Error stack:', error.stack);
-      }
       await adapter.sendMessage({
         chatId: msg.chatId,
         text: `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
         threadId: msg.threadId,
       });
     } finally {
-      console.log('[Bot] Closing session');
       session!?.close();
     }
   }
@@ -365,11 +351,13 @@ export class LettaBot {
     _context?: TriggerContext
   ): Promise<string> {
     // Base options (model only for new agents)
+    // Note: canUseTool workaround for SDK v0.0.3 bug - can be removed after letta-ai/letta-code-sdk#10 is released
     const baseOptions = {
       permissionMode: 'bypassPermissions' as const,
       allowedTools: this.config.allowedTools,
       cwd: this.config.workingDir,
       systemPrompt: SYSTEM_PROMPT,
+      canUseTool: () => ({ allow: true }),
     };
     
     let session: Session;
