@@ -142,6 +142,7 @@ Ask the bot owner to approve with:
       DisconnectReason,
       fetchLatestBaileysVersion,
       makeCacheableSignalKeyStore,
+      downloadMediaMessage,
     } = await import('@whiskeysockets/baileys');
     
     // Load auth state
@@ -253,10 +254,38 @@ Ask the bot owner to approve with:
           this.lidToJid.set(remoteJid, (m.key as any).senderPn);
         }
         
-        // Get message text
-        const text = m.message?.conversation || 
-                     m.message?.extendedTextMessage?.text ||
-                     '';
+        // Get message text or audio
+        let text = m.message?.conversation || 
+                   m.message?.extendedTextMessage?.text ||
+                   '';
+        
+        // Handle audio/voice messages
+        const audioMessage = m.message?.audioMessage;
+        if (audioMessage) {
+          try {
+            const { loadConfig } = await import('../config/index.js');
+            const config = loadConfig();
+            if (!config.transcription?.apiKey && !process.env.OPENAI_API_KEY) {
+              await this.sock!.sendMessage(remoteJid, { 
+                text: 'Voice messages require OpenAI API key for transcription. See: https://github.com/letta-ai/lettabot#voice-messages' 
+              });
+              continue;
+            }
+            
+            // Download audio
+            const buffer = await downloadMediaMessage(m, 'buffer', {});
+            
+            // Transcribe
+            const { transcribeAudio } = await import('../transcription/index.js');
+            const transcript = await transcribeAudio(buffer as Buffer, 'voice.ogg');
+            
+            console.log(`[WhatsApp] Transcribed voice message: "${transcript.slice(0, 50)}..."`);
+            text = `[Voice message]: ${transcript}`;
+          } catch (error) {
+            console.error('[WhatsApp] Error transcribing voice message:', error);
+            continue;
+          }
+        }
         
         if (!text) continue;
         
